@@ -6,11 +6,12 @@ Extract and browse your Canvas LMS course content from `.imscc` backup files. Bu
 
 Takes a Canvas `.imscc` export file and produces an organized, browsable folder you can open in any web browser:
 
-- **Course pages** — lectures, readings, and all wiki content with working images
+- **Course pages** — lectures, readings, and all wiki content with working images and interactive tabs
 - **Quizzes** — settings, question banks, correct answers, and point values
-- **Assignments** — due dates, point values, grading categories, and descriptions
+- **Assignments** — due dates, point values, grading categories, descriptions, and linked rubrics
 - **Discussions** — full discussion prompts with formatting preserved
-- **Rubrics** — criteria, ratings, and point breakdowns
+- **Rubrics** — criteria, ratings, and point breakdowns, linked to their assignments
+- **External tools** — LTI integrations (MyOpenMath, Hypothesis, etc.) shown by name with launch URLs
 - **Files** — all images, PDFs, and media extracted and organized
 - **Module structure** — the full course layout exactly as it appeared in Canvas
 
@@ -63,7 +64,7 @@ my_course_extracted/
 ├── pages/              ← All course pages (lectures, readings, etc.)
 ├── assessments/        ← Quizzes and question banks with answers
 ├── discussions/        ← Discussion prompts
-├── assignments/        ← (metadata shown in index)
+├── assignments/        ← Assignment pages with rubrics
 └── files/              ← Images, PDFs, and other media
 ```
 
@@ -71,9 +72,20 @@ The `index.html` shows your complete course structure with:
 - Clickable module navigation matching your Canvas layout
 - Assignment details (points, due dates, grading category)
 - Color-coded badges for content types (pages, quizzes, discussions, etc.)
+- External tool names for LTI integrations
 - Grading breakdown table
 - Rubric details
 - File browser organized by type
+
+Canvas-specific features like tabbed content work offline — no internet connection needed after extraction.
+
+## Multiple courses
+
+To extract several `.imscc` files at once:
+
+```bash
+for f in *.imscc; do python3 extract.py "$f"; done
+```
 
 ## Contributing
 
