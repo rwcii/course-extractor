@@ -42,7 +42,10 @@ python3 extract.py my_course.imscc -o my_output_folder
 
 # The default output folder is named after the input file
 python3 extract.py "7402-Applied-Calculus.imscc"
-# → creates 7402-Applied-Calculus_extracted/
+# → creates 7402-Applied-Calculus_extracted/ and 7402-Applied-Calculus_extracted.zip
+
+# Skip zip archive creation
+python3 extract.py my_course.imscc --no-zip
 ```
 
 ## How to get your .imscc file
@@ -81,10 +84,18 @@ Canvas-specific features like tabbed content work offline — no internet connec
 
 ## Multiple courses
 
-To extract several `.imscc` files at once:
+Point the tool at a directory of `.imscc` files to extract them all at once:
 
 ```bash
-for f in *.imscc; do python3 extract.py "$f"; done
+# Extract all .imscc files in a directory
+python3 extract.py ./backups/
+# → creates a folder and zip archive for each file inside ./backups/
+
+# Send all output to a specific directory
+python3 extract.py ./backups/ -o ./extracted/
+
+# Batch extract without zip archives
+python3 extract.py ./backups/ --no-zip
 ```
 
 ## Contributing

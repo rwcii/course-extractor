@@ -17,6 +17,7 @@ import html
 import json
 import os
 import re
+import shutil
 import sys
 import zipfile
 import xml.etree.ElementTree as ET
@@ -721,7 +722,7 @@ def extract(imscc_path, output_dir):
 
     if not imscc_path.exists():
         print(f"ERROR: File not found: {imscc_path}", file=sys.stderr)
-        sys.exit(1)
+        return False
 
     print(f"Opening {imscc_path.name} ...")
     zf = zipfile.ZipFile(imscc_path, "r")
@@ -1365,28 +1366,82 @@ def extract(imscc_path, output_dir):
     zf.close()
     print(f"\nDone! Output written to: {output_dir}")
     print(f"Open {output_dir / 'index.html'} in your browser to browse the course.")
+    return True
+
+
+def zip_output(output_dir):
+    output_dir = Path(output_dir)
+    zip_path = shutil.make_archive(str(output_dir), "zip", output_dir)
+    print(f"Archived: {zip_path}")
+    return zip_path
+
+
+def output_dir_for(imscc_path, base_dir=None):
+    name = Path(imscc_path).stem.replace(" ", "_") + "_extracted"
+    if base_dir:
+        return Path(base_dir) / name
+    return Path(name)
 
 
 def main():
     parser = argparse.ArgumentParser(
         description="Extract content from Canvas LMS .imscc backup files.",
-        epilog="Example: python3 extract.py my_course.imscc -o my_course_output",
+        epilog=(
+            "Examples:\n"
+            "  python3 extract.py my_course.imscc\n"
+            "  python3 extract.py ./backups/              (batch: all .imscc in directory)\n"
+            "  python3 extract.py ./backups/ -o ./output/  (batch with shared output dir)\n"
+            "  python3 extract.py my_course.imscc --no-zip (skip zip archive creation)"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("imscc_file", help="Path to the .imscc file")
+    parser.add_argument(
+        "input", help="Path to an .imscc file or a directory containing .imscc files"
+    )
     parser.add_argument(
         "-o",
         "--output",
-        help="Output directory (default: derived from filename)",
+        help="Output directory (default: derived from filename, or input dir for batch)",
+    )
+    parser.add_argument(
+        "--no-zip",
+        action="store_true",
+        help="Skip creating zip archives of extracted output",
     )
     args = parser.parse_args()
 
-    imscc_path = Path(args.imscc_file)
-    if args.output:
-        output_dir = Path(args.output)
-    else:
-        output_dir = Path(imscc_path.stem.replace(" ", "_") + "_extracted")
+    input_path = Path(args.input)
 
-    extract(imscc_path, output_dir)
+    if input_path.is_dir():
+        imscc_files = sorted(input_path.glob("*.imscc"))
+        if not imscc_files:
+            print(f"ERROR: No .imscc files found in {input_path}", file=sys.stderr)
+            sys.exit(1)
+        print(f"Found {len(imscc_files)} .imscc file(s) in {input_path}\n")
+        base_dir = Path(args.output) if args.output else input_path
+        succeeded, failed = 0, 0
+        for imscc_path in imscc_files:
+            print(f"\n{'=' * 60}")
+            print(f"Processing: {imscc_path.name}")
+            print(f"{'=' * 60}")
+            out = output_dir_for(imscc_path, base_dir)
+            if extract(imscc_path, out):
+                if not args.no_zip:
+                    zip_output(out)
+                succeeded += 1
+            else:
+                failed += 1
+        print(f"\n{'=' * 60}")
+        print(f"Batch complete: {succeeded} succeeded, {failed} failed")
+    else:
+        if args.output:
+            output_dir = Path(args.output)
+        else:
+            output_dir = output_dir_for(imscc_path=input_path)
+        if not extract(input_path, output_dir):
+            sys.exit(1)
+        if not args.no_zip:
+            zip_output(output_dir)
 
 
 if __name__ == "__main__":
