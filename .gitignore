@@ -2,6 +2,7 @@
 *.zip
 *_extracted/
 test_output/
+_handoff/
 __pycache__/
 *.pyc
 .DS_Store

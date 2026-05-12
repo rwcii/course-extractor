@@ -21,7 +21,7 @@ import sys
 import zipfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import unquote, urlparse
 
 NS = {
     "ims": "http://www.imsglobal.org/xsd/imsccv1p1/imscp_v1p1",
@@ -289,6 +289,7 @@ def parse_assignment(zf, path):
         "submission_types": find_text(root, "canvas:submission_types"),
         "workflow_state": find_text(root, "canvas:workflow_state"),
         "group_ref": find_text(root, "canvas:assignment_group_identifierref"),
+        "rubric_ref": find_text(root, "canvas:rubric_identifierref"),
         "external_tool_url": find_text(root, "canvas:external_tool_url"),
     }
 
@@ -301,6 +302,29 @@ def parse_discussion(zf, path):
         "title": find_text(root, "dt:title"),
         "text": find_text(root, "dt:text"),
     }
+
+
+def parse_lti_links(zf):
+    lti_map = {}
+    for name in zf.namelist():
+        if not name.startswith("lti_resource_links/") or not name.endswith(".xml"):
+            continue
+        root = parse_xml(zf, name)
+        if root is None:
+            continue
+        ns_blti = "http://www.imsglobal.org/xsd/imsbasiclti_v1p0"
+        title = ""
+        url = ""
+        for el in root.iter():
+            tag = el.tag.split("}")[-1] if "}" in el.tag else el.tag
+            if tag == "title" and ns_blti in el.tag and el.text:
+                title = el.text.strip()
+            elif tag in ("secure_launch_url", "launch_url") and el.text:
+                url = el.text.strip()
+        rid = Path(name).stem
+        if title:
+            lti_map[rid] = {"title": title, "url": url}
+    return lti_map
 
 
 def parse_qti_assessment(zf, path):
@@ -459,6 +483,33 @@ details { margin: 8px 0; }
 summary { cursor: pointer; padding: 4px 0; font-weight: 500; }
 .content-body { padding: 12px; }
 .content-body img { max-width: 100%; }
+.enhanceable_content.tabs > ul { list-style: none; display: flex; flex-wrap: wrap; gap: 0; border-bottom: 2px solid var(--border); margin-bottom: 0; padding: 0; }
+.enhanceable_content.tabs > ul > li { margin: 0; }
+.enhanceable_content.tabs > ul > li > a { display: block; padding: 8px 16px; border: 1px solid transparent; border-bottom: none; border-radius: 6px 6px 0 0; color: var(--text-secondary); font-weight: 500; text-decoration: none; }
+.enhanceable_content.tabs > ul > li > a:hover { background: #f0f0f0; }
+.enhanceable_content.tabs > ul > li > a.tab-active { background: var(--card-bg); border-color: var(--border); color: var(--brand); position: relative; top: 1px; }
+.enhanceable_content.tabs > div { border: 1px solid var(--border); border-top: none; padding: 16px; background: var(--card-bg); }
+"""
+
+PAGE_JS = """\
+document.addEventListener("DOMContentLoaded",function(){
+document.querySelectorAll(".enhanceable_content.tabs").forEach(function(container){
+var tabs=container.querySelectorAll(":scope > ul > li > a");
+var panels=container.querySelectorAll(":scope > div");
+if(!tabs.length||!panels.length)return;
+panels.forEach(function(p){p.style.display="none"});
+function activate(idx){
+tabs.forEach(function(t){t.classList.remove("tab-active")});
+panels.forEach(function(p){p.style.display="none"});
+if(tabs[idx])tabs[idx].classList.add("tab-active");
+if(panels[idx])panels[idx].style.display="block";
+}
+tabs.forEach(function(t,i){
+t.addEventListener("click",function(e){e.preventDefault();activate(i)});
+});
+activate(0);
+});
+});
 """
 
 
@@ -473,6 +524,7 @@ def html_page(title, body, back_link=None, extra_head=""):
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>{html.escape(title)}</title>
 <style>{PAGE_CSS}</style>
+<script>{PAGE_JS}</script>
 {extra_head}
 </head>
 <body>
@@ -566,6 +618,8 @@ def extract(imscc_path, output_dir):
     module_meta = parse_module_meta(zf)
     assignment_groups = parse_assignment_groups(zf)
     rubrics = parse_rubrics(zf)
+    rubric_map = {r["identifier"]: r for r in rubrics}
+    lti_map = parse_lti_links(zf)
 
     print(f"Course: {course_title}")
     print(f"Resources: {len(resources)}")
@@ -834,12 +888,24 @@ def extract(imscc_path, output_dir):
         if info_parts:
             body_parts.append(f'<p class="subtitle">{" &nbsp;|&nbsp; ".join(info_parts)}</p>')
         if asgn.get("external_tool_url"):
+            tool_url = asgn["external_tool_url"]
+            tool_label = lti_map.get(asgn_id, {}).get("title", "")
+            if not tool_label:
+                domain = urlparse(tool_url).netloc
+                if domain.startswith("www."):
+                    domain = domain[4:]
+                tool_label = domain.split(".")[0].title() if domain else "External Tool"
             body_parts.append(
-                f'<p><a href="{html.escape(asgn["external_tool_url"])}" target="_blank">'
-                f'Open in external tool</a></p>'
+                f'<p><a href="{html.escape(tool_url)}" target="_blank">'
+                f'{html.escape(tool_label)}</a></p>'
             )
         if asgn_body:
             body_parts.append(f'<div class="content-body">{asgn_body}</div>')
+
+        rubric_ref = asgn.get("rubric_ref", "")
+        if rubric_ref and rubric_ref in rubric_map:
+            body_parts.append("<h2>Rubric</h2>")
+            body_parts.append(render_rubric_html(rubric_map[rubric_ref]))
 
         fname = f"{slugify(title)}-{asgn_id[:8]}.html"
         asgn_html = html_page(title, "\n".join(body_parts), back_link="../index.html")
@@ -1062,12 +1128,20 @@ def extract(imscc_path, output_dir):
                     if parts:
                         asgn_info = f' <span class="points">({", ".join(parts)})</span>'
 
+                lti_info = ""
+                if not link and iref in lti_map:
+                    lti = lti_map[iref]
+                    if lti.get("url"):
+                        link = lti["url"]
+                    lti_info = f' <span class="points">({html.escape(lti["title"])})</span>'
+
                 title_html = html.escape(ititle)
                 if link:
-                    title_html = f'<a href="{link}">{title_html}</a>'
+                    target = ' target="_blank"' if link.startswith("http") else ""
+                    title_html = f'<a href="{link}"{target}>{title_html}</a>'
 
                 body_parts.append(
-                    f'<li class="{indent_cls.strip()}">{badge} {title_html}{asgn_info}</li>'
+                    f'<li class="{indent_cls.strip()}">{badge} {title_html}{asgn_info}{lti_info}</li>'
                 )
             body_parts.append("</ul>")
 
