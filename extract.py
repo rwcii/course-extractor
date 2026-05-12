@@ -87,7 +87,118 @@ def fix_html_links(content, file_base_path, pages_path="../pages"):
     )
     content = content.replace("$CANVAS_COURSE_REFERENCE$", "#")
     content = fix_youtube_embeds(content)
+    content = fix_equation_images(content)
     return content
+
+
+def resolve_object_references(content, content_maps, this_dir):
+    def resolve_ref(m):
+        ref_id = m.group(1)
+        path = content_maps.get(ref_id, "")
+        if not path:
+            return m.group(0)
+        target_dir = Path(path).parent
+        target_name = Path(path).name
+        if this_dir == target_dir:
+            return target_name
+        return f"../{path}"
+    return re.sub(r'href="#([a-g][0-9a-f]{30,})"', resolve_ref, content)
+
+
+LATEX_SYMBOLS = {
+    "alpha": "α", "beta": "β", "gamma": "γ", "delta": "δ",
+    "epsilon": "ε", "theta": "θ", "lambda": "λ", "mu": "μ",
+    "pi": "π", "sigma": "σ", "phi": "φ", "omega": "ω",
+    "Delta": "Δ", "Sigma": "Σ", "Pi": "Π", "Omega": "Ω",
+    "infty": "∞", "pm": "±", "cdot": "·", "times": "×",
+    "leq": "≤", "le": "≤", "geq": "≥", "ge": "≥",
+    "neq": "≠", "ne": "≠", "approx": "≈",
+    "to": "→", "rightarrow": "→", "Rightarrow": "⇒",
+    "int": "∫", "sum": "Σ", "prod": "Π",
+    "sqrt": "√", "circ": "∘", "dots": "…", "ldots": "…",
+    "quad": "  ",
+}
+
+SUPERSCRIPTS = str.maketrans("0123456789+-()in", "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁽⁾ⁱⁿ")
+
+
+def latex_to_html(tex):
+    tex = html.unescape(tex).strip()
+    tex = re.sub(r"\\begin\{align\}|\\end\{align\}", "", tex)
+    tex = re.sub(r"&amp;", " ", tex)
+    tex = re.sub(r"&", " ", tex)
+    tex = re.sub(r"\\\\\s*\\\\", "<br>", tex)
+    tex = re.sub(r"\\\\", "<br>", tex)
+    tex = re.sub(r"\\left\b|\\right\b", "", tex)
+    tex = re.sub(r"\\lbrack", "[", tex)
+    tex = re.sub(r"\\rbrack", "]", tex)
+    tex = re.sub(r"\\lvert|\\rvert", "|", tex)
+    tex = re.sub(r"\\Biggr?|\\biggr?", "", tex)
+    tex = re.sub(r"\\text\{([^}]*)\}", r"\1", tex)
+    tex = re.sub(r"\\mathcal\{([^}]*)\}", r"\1", tex)
+    tex = re.sub(r"\\mathbb\{([^}]*)\}", r"\1", tex)
+    tex = re.sub(r"\\bar\{([^}]*)\}", r"\1̄", tex)
+    tex = re.sub(r"\\cancel\{([^}]*)\}", r"<s>\1</s>", tex)
+    tex = re.sub(r"\\underbrace\{([^}]*)\}_\\text\{([^}]*)\}", r"\1 (\2)", tex)
+    tex = re.sub(r"\\underbrace\{([^}]*)\}", r"\1", tex)
+
+    def replace_frac(m):
+        num, den = m.group(1), m.group(2)
+        num, den = latex_to_html(num), latex_to_html(den)
+        return (f'<span class="eq-frac">'
+                f'<span class="eq-num">{num}</span>'
+                f'<span class="eq-den">{den}</span></span>')
+    tex = re.sub(r"\\frac\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}", replace_frac, tex)
+
+    tex = re.sub(r"\\sqrt\{([^}]*)\}", r"√(\1)", tex)
+
+    def replace_sup(m):
+        inner = m.group(1) if m.group(1) else m.group(2)
+        simple = inner.translate(SUPERSCRIPTS)
+        if simple != inner or len(inner) > 3:
+            return f"<sup>{latex_to_html(inner)}</sup>"
+        return simple
+    tex = re.sub(r"\^\{([^}]*)\}|\^([\w+\-])", replace_sup, tex)
+
+    tex = re.sub(r"_\{([^}]*)\}", lambda m: f"<sub>{latex_to_html(m.group(1))}</sub>", tex)
+    tex = re.sub(r"_(\w)", lambda m: f"<sub>{m.group(1)}</sub>", tex)
+
+    tex = re.sub(r"\\limits\b", "", tex)
+    tex = re.sub(r"\\lim", "lim", tex)
+
+    for name in ("sin", "cos", "tan", "sec", "csc", "cot", "ln", "log"):
+        tex = tex.replace(f"\\{name}", name)
+
+    for cmd, sym in LATEX_SYMBOLS.items():
+        tex = tex.replace(f"\\{cmd}", sym)
+
+    tex = re.sub(r"\\prime", "′", tex)
+    tex = re.sub(r"\\,", " ", tex)
+    tex = re.sub(r"\\ ", " ", tex)
+    tex = re.sub(r"\\[a-zA-Z]+", "", tex)
+
+    return tex.strip()
+
+
+def fix_equation_images(content):
+    def replace_eq(m):
+        tag = m.group(0)
+        tex_match = re.search(r'data-equation-content="([^"]*)"', tag)
+        if not tex_match:
+            tex_match = re.search(r'alt="(?:LaTeX:\s*)?([^"]*)"', tag)
+        if not tex_match:
+            tex_match = re.search(r'title="([^"]*)"', tag)
+        if not tex_match:
+            return tag
+        tex = tex_match.group(1)
+        rendered = latex_to_html(tex)
+        return f'<span class="eq" title="{html.escape(tex)}">{rendered}</span>'
+    return re.sub(
+        r'<img\b(?:[^>"]|"[^"]*")*class="equation_image"(?:[^>"]|"[^"]*")*/?>',
+        replace_eq,
+        content,
+        flags=re.IGNORECASE,
+    )
 
 
 def fix_youtube_embeds(content):
@@ -483,6 +594,10 @@ details { margin: 8px 0; }
 summary { cursor: pointer; padding: 4px 0; font-weight: 500; }
 .content-body { padding: 12px; }
 .content-body img { max-width: 100%; }
+.eq { font-family: 'Cambria Math','STIX Two Math','Latin Modern Math',serif; font-size: 1.1em; white-space: nowrap; }
+.eq-frac { display: inline-flex; flex-direction: column; align-items: center; vertical-align: middle; margin: 0 2px; text-align: center; }
+.eq-num { border-bottom: 1px solid currentColor; padding: 0 4px 1px; line-height: 1.2; }
+.eq-den { padding: 1px 4px 0; line-height: 1.2; }
 .enhanceable_content.tabs > ul { list-style: none; display: flex; flex-wrap: wrap; gap: 0; border-bottom: 2px solid var(--border); margin-bottom: 0; padding: 0; }
 .enhanceable_content.tabs > ul > li { margin: 0; }
 .enhanceable_content.tabs > ul > li > a { display: block; padding: 8px 16px; border: 1px solid transparent; border-bottom: none; border-radius: 6px 6px 0 0; color: var(--text-secondary); font-weight: 500; text-decoration: none; }
@@ -1009,6 +1124,37 @@ def extract(imscc_path, output_dir):
 
             content = content.replace('</body>', f'{nav_html}\n</body>')
             fpath.write_text(content, encoding="utf-8")
+
+    # --- Resolve cross-content links ---
+    print("Resolving cross-content links ...")
+    all_content_maps_full = dict(all_content_maps)
+    for mod in sorted_modules:
+        mod_id = mod["identifier"]
+        meta = module_meta.get(mod_id, {})
+        mod_title = meta.get("title") or mod.get("title") or ""
+        if mod_title:
+            first_item = next(
+                (all_content_maps.get(item.get("identifier", ""))
+                 for item in meta.get("items", [])
+                 if all_content_maps.get(item.get("identifier", ""))),
+                None,
+            )
+            if first_item:
+                all_content_maps_full[mod_id] = first_item
+
+    for subdir in ("pages", "discussions", "assignments", "assessments"):
+        content_dir = output_dir / subdir
+        if not content_dir.exists():
+            continue
+        for fpath in content_dir.glob("*.html"):
+            text = fpath.read_text(encoding="utf-8")
+            if '="#g' not in text and "=#g" not in text:
+                continue
+            updated = resolve_object_references(
+                text, all_content_maps_full, Path(subdir),
+            )
+            if updated != text:
+                fpath.write_text(updated, encoding="utf-8")
 
     # --- Build index.html ---
     print("Building index.html ...")
