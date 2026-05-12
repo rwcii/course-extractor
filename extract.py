@@ -69,24 +69,50 @@ def find_text(elem, xpath, ns=NS, default=""):
     return node.text.strip() if node is not None and node.text else default
 
 
-def fix_html_links(content, file_base_path):
+def fix_html_links(content, file_base_path, pages_path="../pages"):
     content = re.sub(
-        r'\$IMS-CC-FILEBASE\$/([^"?]*)',
+        r'\$IMS-CC-FILEBASE\$/([^"?]*)(?:\?[^"]*)?',
         lambda m: f"{file_base_path}/{unquote(m.group(1))}",
         content,
     )
     content = re.sub(
         r'\$WIKI_REFERENCE\$/pages/([^"]*)',
-        lambda m: f"../pages/{m.group(1)}.html",
+        lambda m: f"{pages_path}/{m.group(1)}.html",
         content,
     )
     content = re.sub(
-        r'\$CANVAS_OBJECT_REFERENCE\$/(?:assignments|quizzes|modules)/([^"]*)',
+        r'\$CANVAS_OBJECT_REFERENCE\$/(?:assignments|quizzes|modules|discussion_topics)/([^"]*)',
         lambda m: f"#{m.group(1)}",
         content,
     )
     content = content.replace("$CANVAS_COURSE_REFERENCE$", "#")
+    content = fix_youtube_embeds(content)
     return content
+
+
+def fix_youtube_embeds(content):
+    def replace_iframe(m):
+        attrs = m.group(1)
+        src_match = re.search(r'src="([^"]*)"', attrs)
+        if not src_match:
+            return m.group(0)
+        src = src_match.group(1)
+        video_id = None
+        vid_match = re.search(r'(?:embed|v)/([a-zA-Z0-9_-]{11})', src)
+        if vid_match:
+            video_id = vid_match.group(1)
+        if not video_id:
+            return m.group(0)
+        yt_url = f"https://www.youtube.com/watch?v={video_id}"
+        thumb = f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg"
+        return (
+            f'<a href="{yt_url}" target="_blank" style="display:inline-block;position:relative;">'
+            f'<img src="{thumb}" alt="YouTube video" style="max-width:560px;border-radius:8px;" loading="lazy">'
+            f'<span style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);'
+            f'font-size:48px;color:#fff;text-shadow:0 0 8px rgba(0,0,0,.7);">&#9654;</span>'
+            f'</a>'
+        )
+    return re.sub(r'<iframe\b([^>]*youtube[^>]*)>[^<]*</iframe>', replace_iframe, content, flags=re.IGNORECASE)
 
 
 # ---------------------------------------------------------------------------
@@ -767,16 +793,60 @@ def extract(imscc_path, output_dir):
         (dirs["assessments"] / fname).write_text(quiz_html, encoding="utf-8")
         assessment_map[rid] = f"assessments/{fname}"
 
-    # --- Extract assignment metadata ---
+    # --- Extract assignments (metadata + HTML content) ---
+    print("Extracting assignments ...")
     for name in zf.namelist():
-        if name.endswith("/assignment_settings.xml"):
-            asgn = parse_assignment(zf, name)
-            if asgn:
-                assignment_map[asgn["identifier"]] = asgn
-                group_title = assignment_groups.get(
-                    asgn.get("group_ref", ""), {}
-                ).get("title", "")
-                asgn["group_title"] = group_title
+        if not name.endswith("/assignment_settings.xml"):
+            continue
+        asgn = parse_assignment(zf, name)
+        if not asgn:
+            continue
+        asgn_id = asgn["identifier"]
+        group_title = assignment_groups.get(
+            asgn.get("group_ref", ""), {}
+        ).get("title", "")
+        asgn["group_title"] = group_title
+
+        asgn_dir = name.rsplit("/", 1)[0]
+        html_files = [
+            n for n in zf.namelist()
+            if n.startswith(asgn_dir + "/") and n.endswith(".html")
+        ]
+        asgn_body = ""
+        for hf in html_files:
+            raw = read_zip_text(zf, hf)
+            if raw:
+                raw = fix_html_links(raw, file_base_path)
+                body_match = re.search(r"<body>(.*)</body>", raw, re.DOTALL | re.IGNORECASE)
+                asgn_body = body_match.group(1).strip() if body_match else ""
+
+        title = asgn.get("title") or asgn_id
+        body_parts = [f"<h1>{html.escape(title)}</h1>"]
+        info_parts = []
+        if asgn.get("points_possible"):
+            info_parts.append(f"<strong>Points:</strong> {asgn['points_possible']}")
+        if asgn.get("due_at"):
+            info_parts.append(f"<strong>Due:</strong> {asgn['due_at'][:16]}")
+        if group_title:
+            info_parts.append(f"<strong>Category:</strong> {html.escape(group_title)}")
+        if asgn.get("submission_types"):
+            info_parts.append(f"<strong>Submission:</strong> {asgn['submission_types'].replace('_', ' ')}")
+        if info_parts:
+            body_parts.append(f'<p class="subtitle">{" &nbsp;|&nbsp; ".join(info_parts)}</p>')
+        if asgn.get("external_tool_url"):
+            body_parts.append(
+                f'<p><a href="{html.escape(asgn["external_tool_url"])}" target="_blank">'
+                f'Open in external tool</a></p>'
+            )
+        if asgn_body:
+            body_parts.append(f'<div class="content-body">{asgn_body}</div>')
+
+        fname = f"{slugify(title)}-{asgn_id[:8]}.html"
+        asgn_html = html_page(title, "\n".join(body_parts), back_link="../index.html")
+        (dirs["assignments"] / fname).write_text(asgn_html, encoding="utf-8")
+
+        asgn["_page"] = f"assignments/{fname}"
+        assignment_map[asgn_id] = asgn
 
     # --- Extract files (images, PDFs, media) ---
     file_prefixes = ("web_resources/", "Media/", "Files/", "images/")
@@ -797,6 +867,82 @@ def extract(imscc_path, output_dir):
             out_path.write_bytes(zf.read(fe))
         except KeyError:
             pass
+
+    # --- Sort modules ---
+    sorted_modules = manifest_modules
+    if module_meta:
+        pos_map = {}
+        for mid, mm in module_meta.items():
+            try:
+                pos_map[mid] = int(mm.get("position", 999))
+            except ValueError:
+                pos_map[mid] = 999
+        sorted_modules = sorted(
+            manifest_modules, key=lambda m: pos_map.get(m["identifier"], 999)
+        )
+
+    # --- Add prev/next navigation to content pages ---
+    print("Adding page navigation ...")
+    all_content_maps = {**page_map, **discussion_map, **assessment_map}
+    for aid, asgn in assignment_map.items():
+        if isinstance(asgn, dict) and asgn.get("_page"):
+            all_content_maps[aid] = asgn["_page"]
+
+    for mod in sorted_modules:
+        mod_id = mod["identifier"]
+        meta = module_meta.get(mod_id, {})
+        meta_items = meta.get("items", [])
+
+        nav_items = []
+        for item in meta_items:
+            iref = item.get("identifier", "")
+            itype = item.get("content_type", "")
+            ititle = item.get("title", "")
+            if "SubHeader" in itype or not iref:
+                continue
+            path = all_content_maps.get(iref, "")
+            if path:
+                nav_items.append({"title": ititle, "path": path})
+
+        for idx, nav in enumerate(nav_items):
+            fpath = output_dir / nav["path"]
+            if not fpath.exists():
+                continue
+            content = fpath.read_text(encoding="utf-8")
+
+            # Strip Canvas navigation prompts (single-line only to avoid eating content)
+            content = re.sub(
+                r'<p[^>]*>[^<]*(?:<[^>]*>)*[^<]*Select the (?:Next|Previous) button[^<]*(?:<[^>]*>)*[^<]*</p>',
+                '', content, flags=re.IGNORECASE,
+            )
+            content = re.sub(
+                r'<hr[^>]*>\s*$', '', content.rstrip(), flags=re.IGNORECASE,
+            )
+
+            # Compute relative path from this file to siblings
+            this_dir = Path(nav["path"]).parent
+            def rel(target):
+                target_dir = Path(target).parent
+                target_name = Path(target).name
+                if this_dir == target_dir:
+                    return target_name
+                return f"../{target}"
+
+            nav_html = '<div style="display:flex;justify-content:space-between;margin-top:24px;padding-top:12px;border-top:2px solid var(--accent);">'
+            if idx > 0:
+                prev_item = nav_items[idx - 1]
+                nav_html += f'<a href="{rel(prev_item["path"])}">&larr; {html.escape(prev_item["title"])}</a>'
+            else:
+                nav_html += '<span></span>'
+            if idx < len(nav_items) - 1:
+                next_item = nav_items[idx + 1]
+                nav_html += f'<a href="{rel(next_item["path"])}">{html.escape(next_item["title"])} &rarr;</a>'
+            else:
+                nav_html += '<span></span>'
+            nav_html += '</div>'
+
+            content = content.replace('</body>', f'{nav_html}\n</body>')
+            fpath.write_text(content, encoding="utf-8")
 
     # --- Build index.html ---
     print("Building index.html ...")
@@ -823,23 +969,14 @@ def extract(imscc_path, output_dir):
     # Syllabus
     syllabus = read_zip_text(zf, "course_settings/syllabus.html")
     if syllabus and syllabus.strip() and len(syllabus.strip()) > 50:
+        body_match = re.search(r"<body>(.*)</body>", syllabus, re.DOTALL | re.IGNORECASE)
+        syl_body = body_match.group(1) if body_match else syllabus
+        syl_body = fix_html_links(syl_body, "files", pages_path="pages")
         body_parts.append('<h2>Syllabus</h2>')
-        body_parts.append(f'<div class="card content-body">{syllabus}</div>')
+        body_parts.append(f'<div class="card content-body">{syl_body}</div>')
 
     # Modules section
     body_parts.append('<h2 id="modules">Modules</h2>')
-
-    sorted_modules = manifest_modules
-    if module_meta:
-        pos_map = {}
-        for mid, mm in module_meta.items():
-            try:
-                pos_map[mid] = int(mm.get("position", 999))
-            except ValueError:
-                pos_map[mid] = 999
-        sorted_modules = sorted(
-            manifest_modules, key=lambda m: pos_map.get(m["identifier"], 999)
-        )
 
     for mod_idx, mod in enumerate(sorted_modules, 1):
         mod_id = mod["identifier"]
@@ -907,6 +1044,8 @@ def extract(imscc_path, output_dir):
                     link = discussion_map[iref]
                 elif iref in assessment_map:
                     link = assessment_map[iref]
+                elif iref in assignment_map and isinstance(assignment_map[iref], dict):
+                    link = assignment_map[iref].get("_page", "")
 
                 badge = badge_for_type(itype)
 
